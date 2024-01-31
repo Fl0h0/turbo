@@ -9,22 +9,11 @@ use turborepo_ui::{start_spinner, BOLD};
 
 use crate::{
     auth::{check_token, extract_vercel_token},
-    error, ui, LoginOptions,
+    error, ui, LoginOptions, Token,
 };
 
 const DEFAULT_HOST_NAME: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 9789;
-
-/// Token is the result of a successful login. It contains the token string and
-/// a boolean indicating whether the token already existed on the filesystem.
-#[derive(Debug)]
-pub struct Token {
-    /// The actual token string.
-    pub token: String,
-    /// If this is `true`, it means this token already exists on the filesystem.
-    /// If `false`, this is a new token.
-    pub exists: bool,
-}
 
 /// Login returns a `Token` struct. If a token is already present,
 /// we do not overwrite it and instead log that we found an existing token,
@@ -52,10 +41,7 @@ pub async fn login<T: Client>(options: &LoginOptions<'_, T>) -> Result<Token, Er
                     "{}",
                     ui.apply(BOLD.apply_to("Existing Vercel token found!"))
                 );
-                return Ok(Token {
-                    token,
-                    exists: true,
-                });
+                return Ok(Token::Existing(token));
             }
             Err(error) => {
                 // Only send the warning if we're debugging.
@@ -91,7 +77,9 @@ pub async fn login<T: Client>(options: &LoginOptions<'_, T>) -> Result<Token, Er
     login_server
         .run(
             DEFAULT_PORT,
-            login_url_configuration.to_string(),
+            crate::LoginType::Basic {
+                login_url_configuration: login_url_configuration.to_string(),
+            },
             token_cell.clone(),
         )
         .await?;
@@ -108,10 +96,7 @@ pub async fn login<T: Client>(options: &LoginOptions<'_, T>) -> Result<Token, Er
 
     ui::print_cli_authorized(&user_response.user.email, ui);
 
-    Ok(Token {
-        token: token.into(),
-        exists: false,
-    })
+    Ok(Token::Existing(token.into()))
 }
 
 #[cfg(test)]
@@ -129,7 +114,7 @@ mod tests {
     use turborepo_vercel_api_mock::start_test_server;
 
     use super::*;
-    use crate::LoginServer;
+    use crate::{login_server, LoginServer};
 
     struct MockLoginServer {
         hits: Arc<AtomicUsize>,
@@ -140,7 +125,7 @@ mod tests {
         async fn run(
             &self,
             _: u16,
-            _: String,
+            _: login_server::LoginType,
             login_token: Arc<OnceCell<String>>,
         ) -> Result<(), Error> {
             self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -313,16 +298,16 @@ mod tests {
         let mut options = LoginOptions::new(&ui, &url, &api_client, &login_server);
 
         let token = login(&options).await.unwrap();
-        assert!(!token.exists);
+        assert!(!matches!(token, Token::Existing(..)));
 
-        let got_token = token.token.to_string();
+        let got_token = token.into_inner().to_string();
         assert_eq!(&got_token, turborepo_vercel_api_mock::EXPECTED_TOKEN);
 
         // Call the login function a second time to test that we check for existing
         // tokens. Total server hits should be 1.
         options.existing_token = Some(&got_token);
         let second_token = login(&options).await.unwrap();
-        assert!(second_token.exists);
+        assert!(matches!(second_token, Token::Existing(..)));
 
         api_server.abort();
         assert_eq!(
